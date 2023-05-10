@@ -27,6 +27,7 @@ type CustomIpPrefixModel struct {
 	InternetAdvertisingDisabled bool              `tfschema:"internet_advertising_disabled"`
 	Location                    string            `tfschema:"location"`
 	Name                        string            `tfschema:"name"`
+	ParentCustomIPPrefixID      string            `tfschema:"parent_custom_ip_prefix_id"`
 	ROAValidityEndDate          string            `tfschema:"roa_validity_end_date"`
 	ResourceGroupName           string            `tfschema:"resource_group_name"`
 	Tags                        map[string]string `tfschema:"tags"`
@@ -83,6 +84,13 @@ func (r CustomIpPrefixResource) Arguments() map[string]*pluginsdk.Schema {
 
 				return
 			},
+		},
+
+		"parent_custom_ip_prefix_id": {
+			Type:         pluginsdk.TypeString,
+			Optional:     true,
+			ForceNew:     true,
+			ValidateFunc: validate.CustomIpPrefixID,
 		},
 
 		"roa_validity_end_date": {
@@ -203,6 +211,12 @@ func (r CustomIpPrefixResource) Create() sdk.ResourceFunc {
 					Cidr:              &model.CIDR,
 					CommissionedState: network.CommissionedStateProvisioning,
 				},
+			}
+
+			if model.ParentCustomIPPrefixID != "" {
+				properties.CustomIPPrefixPropertiesFormat.CustomIPPrefixParent = &network.SubResource{
+					ID: &model.ParentCustomIPPrefixID,
+				}
 			}
 
 			if model.WANValidationSignedMessage != "" {
@@ -442,6 +456,7 @@ func (r CustomIpPrefixResource) updateCommissionedState(ctx context.Context, id 
 		},
 	}
 
+	// transitioningStatesFor returns the known transitioning states for the desired goal state
 	transitioningStatesFor := func(finalState network.CommissionedState) (out commissionedStates) {
 		switch finalState {
 		case network.CommissionedStateProvisioned:
@@ -454,6 +469,7 @@ func (r CustomIpPrefixResource) updateCommissionedState(ctx context.Context, id 
 		return
 	}
 
+	// finalStatesFor returns the known final states for the current transitioning state
 	finalStatesFor := func(transitioningState network.CommissionedState) (out commissionedStates) {
 		switch transitioningState {
 		case network.CommissionedStateProvisioning:
@@ -466,6 +482,19 @@ func (r CustomIpPrefixResource) updateCommissionedState(ctx context.Context, id 
 			out = commissionedStates{network.CommissionedStateProvisioned}
 		}
 		return
+	}
+
+	// shouldNotAdvertise determines whether to set the noInternetAdvertise flag, which can only be set at the point of transitioning to `Commissioning`
+	shouldNotAdvertise := func(steppingState network.CommissionedState) *bool {
+		if steppingState == network.CommissionedStateCommissioning {
+			switch desiredState {
+			case network.CommissionedStateCommissioned:
+				return pointer.To(false)
+			case network.CommissionedStateCommissionedNoInternetAdvertise:
+				return pointer.To(true)
+			}
+		}
+		return nil
 	}
 
 	if plan, ok := stateTree[desiredState]; ok {
@@ -486,18 +515,7 @@ func (r CustomIpPrefixResource) updateCommissionedState(ctx context.Context, id 
 				}
 
 				for _, steppingState := range path {
-					// Determine whether to set the noInternetAdvertise flag, which can only be set at the point of transitioning to `Commissioning`
-					var noInternetAdvertise *bool
-					if steppingState == network.CommissionedStateCommissioning {
-						switch desiredState {
-						case network.CommissionedStateCommissioned:
-							noInternetAdvertise = pointer.To(false)
-						case network.CommissionedStateCommissionedNoInternetAdvertise:
-							noInternetAdvertise = pointer.To(true)
-						}
-					}
-
-					if err := r.setCommissionedState(ctx, id, steppingState, noInternetAdvertise); err != nil {
+					if err := r.setCommissionedState(ctx, id, steppingState, shouldNotAdvertise(steppingState)); err != nil {
 						return err
 					}
 
